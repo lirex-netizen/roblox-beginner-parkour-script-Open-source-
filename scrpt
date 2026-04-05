@@ -1,0 +1,358 @@
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local character = script.Parent
+local humanoid = character:WaitForChild("Humanoid")
+local rootPart = character:WaitForChild("HumanoidRootPart")
+local camera = workspace.CurrentCamera
+
+local normalSpeed = 16
+local sprintSpeed = 28
+local climbSpeed = 15
+local wallRunSpeed = 30
+local slideSpeed = 45
+local dashSpeed = 60 
+local dashTime = 0.2 
+local dashCooldown = 1.5 
+
+local slideTime = 0.85
+local maxClimbTime = 3
+local maxWallRunTime = 2.5
+
+local sprintAnimationId = "rbxassetid://96859052091595" 
+local slideAnimationId = "rbxassetid://2133312581" 
+
+local raycastParams = RaycastParams.new()
+raycastParams.FilterDescendantsInstances = {character}
+raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+
+local animator = humanoid:WaitForChild("Animator")
+
+local sprintAnimation = Instance.new("Animation")
+sprintAnimation.AnimationId = sprintAnimationId
+local sprintTrack = animator:LoadAnimation(sprintAnimation)
+
+local slideAnimation = Instance.new("Animation")
+slideAnimation.AnimationId = slideAnimationId
+local slideTrack = animator:LoadAnimation(slideAnimation)
+
+local function createDust(name, color, direction)
+	local dust = Instance.new("ParticleEmitter")
+	dust.Name = name
+	dust.Parent = rootPart
+	dust.Enabled = false
+	dust.Rate = 100
+	dust.Lifetime = NumberRange.new(0.2, 0.4)
+	dust.Speed = NumberRange.new(5, 10)
+	dust.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0) })
+	dust.Color = ColorSequence.new(color)
+	dust.EmissionDirection = direction
+	return dust
+end
+
+local sprintParticles = createDust("SprintDust", Color3.fromRGB(200, 200, 200), Enum.NormalId.Bottom)
+local wallParticles = createDust("WallDust", Color3.fromRGB(150, 150, 150), Enum.NormalId.Back)
+local slideParticles = createDust("SlideDust", Color3.fromRGB(220, 220, 220), Enum.NormalId.Back)
+
+local isSprinting = false
+local isClimbing = false
+local isWallRunning = false
+local isSliding = false
+local isDashing = false
+local actionEndTime = 0
+local lastDashTime = 0
+local wallRunSide = nil
+local currentWallNormal = nil
+
+local targetWalkSpeed = normalSpeed
+local targetFOV = 70
+local targetTilt = 0
+local currentTilt = 0
+
+local function clearActionForces()
+	if rootPart:FindFirstChild("ActionVelocity") then rootPart.ActionVelocity:Destroy() end
+	if rootPart:FindFirstChild("ActionAttachment") then rootPart.ActionAttachment:Destroy() end
+end
+
+local function startDash()
+	if isDashing or isClimbing or isWallRunning then return end
+	
+	isDashing = true
+	lastDashTime = tick()
+	targetFOV = 100 
+	
+	slideParticles:Emit(30)
+	
+	local attachment = Instance.new("Attachment", rootPart)
+	attachment.Name = "DashAttachment"
+	local lv = Instance.new("LinearVelocity", rootPart)
+	lv.Name = "DashVelocity"
+	lv.Attachment0 = attachment
+	lv.MaxForce = math.huge
+	
+	local moveDir = humanoid.MoveDirection
+	if moveDir.Magnitude == 0 then moveDir = rootPart.CFrame.LookVector end
+	lv.VectorVelocity = moveDir * dashSpeed
+	
+	task.delay(dashTime, function()
+		isDashing = false
+		targetFOV = isSprinting and 85 or 70 
+		if lv then lv:Destroy() end
+		if attachment then attachment:Destroy() end
+	end)
+end
+
+local function startSprint()
+	if isSprinting or isSliding then return end
+	isSprinting = true
+	targetWalkSpeed = sprintSpeed
+	targetFOV = 85 
+	sprintParticles.Enabled = true
+	if not sprintTrack.IsPlaying then sprintTrack:Play() end
+end
+
+local function stopSprint()
+	if not isSprinting then return end
+	isSprinting = false
+	targetWalkSpeed = normalSpeed
+	targetFOV = 70
+	sprintParticles.Enabled = false
+	if sprintTrack.IsPlaying then sprintTrack:Stop() end
+end
+
+local function stopSlide()
+	if not isSliding then return end
+	
+	local hit = workspace:Raycast(rootPart.Position, Vector3.new(0, 4, 0), raycastParams)
+	if hit then
+		task.delay(0.1, stopSlide)
+		return
+	end
+	
+	isSliding = false
+	targetFOV = isSprinting and 85 or 70
+	slideParticles.Enabled = false
+	if slideTrack.IsPlaying then slideTrack:Stop() end
+	clearActionForces()
+	
+	for _, part in pairs(character:GetChildren()) do
+		if part:IsA("BasePart") and (part.Name == "Head" or part.Name == "UpperTorso" or part.Name == "LowerTorso" or part.Name == "Torso") then
+			part.CanCollide = true
+		end
+	end
+end
+
+local function startSlide()
+	if isSliding or isClimbing or isWallRunning then return end
+	local state = humanoid:GetState()
+	if state ~= Enum.HumanoidStateType.Running and state ~= Enum.HumanoidStateType.RunningNoPhysics then return end
+	
+	isSliding = true
+	targetFOV = 95 
+	slideParticles.Enabled = true
+	if not slideTrack.IsPlaying then slideTrack:Play() end
+	
+	for _, part in pairs(character:GetChildren()) do
+		if part:IsA("BasePart") and (part.Name == "Head" or part.Name == "UpperTorso" or part.Name == "LowerTorso" or part.Name == "Torso") then
+			part.CanCollide = false
+		end
+	end
+	
+	local attachment = Instance.new("Attachment", rootPart)
+	attachment.Name = "ActionAttachment"
+	local lv = Instance.new("LinearVelocity", rootPart)
+	lv.Name = "ActionVelocity"
+	lv.Attachment0 = attachment
+	lv.ForceLimitMode = Enum.ForceLimitMode.PerAxis
+	lv.MaxAxesForce = Vector3.new(math.huge, 0, math.huge)
+	
+	local startTime = tick()
+	local connection
+	connection = RunService.Heartbeat:Connect(function()
+		if not isSliding then
+			connection:Disconnect()
+			return
+		end
+		
+		local elapsed = tick() - startTime
+		if elapsed >= slideTime then
+			clearActionForces()
+			stopSlide()
+		else
+			local currentSpeed = slideSpeed + (normalSpeed - slideSpeed) * (elapsed / slideTime)
+			if rootPart:FindFirstChild("ActionVelocity") then
+				rootPart.ActionVelocity.VectorVelocity = rootPart.CFrame.LookVector * currentSpeed
+			end
+		end
+	end)
+end
+
+local function stopWallActions()
+	isClimbing = false
+	isWallRunning = false
+	targetFOV = isSprinting and 85 or 70
+	wallParticles.Enabled = false
+	clearActionForces()
+end
+
+local function attemptWallClimb()
+	local hit = workspace:Raycast(rootPart.Position, rootPart.CFrame.LookVector * 3, raycastParams)
+	if hit then
+		isClimbing = true
+		targetFOV = 85
+		actionEndTime = tick() + maxClimbTime
+		wallParticles.Enabled = true
+		
+		local attachment = Instance.new("Attachment", rootPart)
+		attachment.Name = "ActionAttachment"
+		local lv = Instance.new("LinearVelocity", rootPart)
+		lv.Name = "ActionVelocity"
+		lv.Attachment0 = attachment
+		lv.MaxForce = math.huge
+		lv.VectorVelocity = Vector3.new(0, climbSpeed, 0)
+		return true
+	end
+	return false
+end
+
+local function attemptWallRun()
+	local rightRay = workspace:Raycast(rootPart.Position, rootPart.CFrame.RightVector * 4, raycastParams)
+	local leftRay = workspace:Raycast(rootPart.Position, -rootPart.CFrame.RightVector * 4, raycastParams)
+	
+	local hit = rightRay or leftRay
+	if hit then
+		isWallRunning = true
+		targetFOV = 95
+		actionEndTime = tick() + maxWallRunTime
+		currentWallNormal = hit.Normal
+		wallRunSide = rightRay and "Right" or "Left"
+		wallParticles.Enabled = true
+		
+		local attachment = Instance.new("Attachment", rootPart)
+		attachment.Name = "ActionAttachment"
+		local lv = Instance.new("LinearVelocity", rootPart)
+		lv.Name = "ActionVelocity"
+		lv.Attachment0 = attachment
+		lv.MaxForce = math.huge
+		
+		local forward = rootPart.CFrame.LookVector
+		local flatForward = Vector3.new(forward.X, 0, forward.Z).Unit
+		local runDir = flatForward - (flatForward:Dot(currentWallNormal) * currentWallNormal)
+		lv.VectorVelocity = runDir.Unit * wallRunSpeed
+		return true
+	end
+	return false
+end
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+	
+	if input.KeyCode == Enum.KeyCode.Q then
+		if tick() - lastDashTime >= dashCooldown then startDash() end
+	end
+	
+	if input.KeyCode == Enum.KeyCode.LeftShift and UserInputService:IsKeyDown(Enum.KeyCode.W) then
+		startSprint()
+	elseif input.KeyCode == Enum.KeyCode.W and UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then
+		startSprint()
+	end
+	
+	if input.KeyCode == Enum.KeyCode.C then
+		if isSprinting then startSlide() end
+	end
+	
+	if input.KeyCode == Enum.KeyCode.Space then
+		if isSliding then
+			local hit = workspace:Raycast(rootPart.Position, Vector3.new(0, 4, 0), raycastParams)
+			if not hit then stopSlide() end
+			return
+		end
+		
+		if isWallRunning then
+			stopWallActions()
+			rootPart.AssemblyLinearVelocity = currentWallNormal * 30 + Vector3.new(0, 35, 0)
+			return
+		end
+		
+		local state = humanoid:GetState()
+		if isSprinting and (state == Enum.HumanoidStateType.Freefall or state == Enum.HumanoidStateType.Jumping) then
+			if not isClimbing and not isWallRunning then
+				local climbed = attemptWallClimb()
+				if not climbed then attemptWallRun() end
+			end
+		end
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input, gameProcessed)
+	if input.KeyCode == Enum.KeyCode.W then
+		stopSprint()
+	end
+end)
+
+RunService:BindToRenderStep("SmoothMovement", Enum.RenderPriority.Camera.Value + 1, function(deltaTime)
+	player.CameraMode = Enum.CameraMode.LockFirstPerson
+	
+	humanoid.WalkSpeed = humanoid.WalkSpeed + (targetWalkSpeed - humanoid.WalkSpeed) * 10 * deltaTime
+	camera.FieldOfView = camera.FieldOfView + (targetFOV - camera.FieldOfView) * 10 * deltaTime
+	
+	if isWallRunning then
+		targetTilt = (wallRunSide == "Right") and 15 or -15
+	else
+		local moveDir = rootPart.CFrame:VectorToObjectSpace(humanoid.MoveDirection)
+		targetTilt = -moveDir.X * 4 
+	end
+	
+	currentTilt = currentTilt + (targetTilt - currentTilt) * 10 * deltaTime
+	camera.CFrame = camera.CFrame * CFrame.Angles(0, 0, math.rad(currentTilt))
+	
+	local targetOffset = isSliding and Vector3.new(0, -1.5, -1) or Vector3.new(0, 0.8, -1)
+	humanoid.CameraOffset = humanoid.CameraOffset:Lerp(targetOffset, 10 * deltaTime)
+	
+	for _, part in pairs(character:GetChildren()) do
+		if part:IsA("BasePart") and part.Name ~= "Head" then
+			part.LocalTransparencyModifier = 0
+		end
+	end
+end)
+
+RunService.Heartbeat:Connect(function()
+	if isClimbing then
+		if tick() >= actionEndTime then
+			stopWallActions()
+		else
+			local hit = workspace:Raycast(rootPart.Position, rootPart.CFrame.LookVector * 3, raycastParams)
+			if not hit then
+				local ledgeOrigin = rootPart.Position + rootPart.CFrame.LookVector * 3 + Vector3.new(0, 2, 0)
+				local ledgeHit = workspace:Raycast(ledgeOrigin, Vector3.new(0, -10, 0), raycastParams)
+				stopWallActions()
+				if ledgeHit then
+					rootPart.AssemblyLinearVelocity = rootPart.CFrame.LookVector * 25 + Vector3.new(0, 20, 0)
+				end
+			end
+		end
+		
+	elseif isWallRunning then
+		if tick() >= actionEndTime then
+			stopWallActions()
+		else
+			local dir = (wallRunSide == "Right") and rootPart.CFrame.RightVector or -rootPart.CFrame.RightVector
+			local hit = workspace:Raycast(rootPart.Position, dir * 4, raycastParams)
+			
+			if not hit then
+				stopWallActions()
+			else
+				currentWallNormal = hit.Normal
+				local forward = workspace.CurrentCamera.CFrame.LookVector
+				local flatForward = Vector3.new(forward.X, 0, forward.Z).Unit
+				local runDir = flatForward - (flatForward:Dot(currentWallNormal) * currentWallNormal)
+				
+				if rootPart:FindFirstChild("ActionVelocity") and runDir.Magnitude > 0 then
+					rootPart.ActionVelocity.VectorVelocity = runDir.Unit * wallRunSpeed
+				end
+			end
+		end
+	end
+end)
