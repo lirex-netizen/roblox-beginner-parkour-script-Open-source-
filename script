@@ -18,11 +18,19 @@ local dashTime = 0.2
 local dashCooldown = 1.5 
 
 local slideTime = 0.85
+local backflipTime = 0.6
 local maxClimbTime = 3
 local maxWallRunTime = 2.5
 
+local safeFallDistance = 20
+local fallDamageMultiplier = 2.5
+local maxGrappleDistance = 200
+local grappleSpeed = 100
+
 local sprintAnimationId = "rbxassetid://96859052091595" 
 local slideAnimationId = "rbxassetid://2133312581" 
+local rollAnimationId = "rbxassetid://3288508192" 
+local backflipAnimationId = "rbxassetid://1234567890" 
 
 local raycastParams = RaycastParams.new()
 raycastParams.FilterDescendantsInstances = {character}
@@ -37,6 +45,14 @@ local sprintTrack = animator:LoadAnimation(sprintAnimation)
 local slideAnimation = Instance.new("Animation")
 slideAnimation.AnimationId = slideAnimationId
 local slideTrack = animator:LoadAnimation(slideAnimation)
+
+local rollAnimation = Instance.new("Animation")
+rollAnimation.AnimationId = rollAnimationId
+local rollTrack = animator:LoadAnimation(rollAnimation)
+
+local backflipAnimation = Instance.new("Animation")
+backflipAnimation.AnimationId = backflipAnimationId
+local backflipTrack = animator:LoadAnimation(backflipAnimation)
 
 local function createDust(name, color, direction)
 	local dust = Instance.new("ParticleEmitter")
@@ -55,35 +71,161 @@ end
 local sprintParticles = createDust("SprintDust", Color3.fromRGB(200, 200, 200), Enum.NormalId.Bottom)
 local wallParticles = createDust("WallDust", Color3.fromRGB(150, 150, 150), Enum.NormalId.Back)
 local slideParticles = createDust("SlideDust", Color3.fromRGB(220, 220, 220), Enum.NormalId.Back)
+local dashParticles = createDust("DashDust", Color3.fromRGB(255, 255, 255), Enum.NormalId.Back)
+local rollParticles = createDust("RollDust", Color3.fromRGB(180, 180, 180), Enum.NormalId.Bottom)
+local flipParticles = createDust("FlipDust", Color3.fromRGB(200, 200, 255), Enum.NormalId.Bottom)
 
 local isSprinting = false
 local isClimbing = false
 local isWallRunning = false
 local isSliding = false
 local isDashing = false
+local isRolling = false
+local isFalling = false
+local isBackflipping = false
+local isGrappling = false
+
 local actionEndTime = 0
 local lastDashTime = 0
+local fallStartHeight = 0
 local wallRunSide = nil
 local currentWallNormal = nil
+
+local grappleTarget = nil
+local grappleAtt0 = nil
+local grappleAtt1 = nil
+local grappleBeam = nil
+local grappleVelocity = nil
 
 local targetWalkSpeed = normalSpeed
 local targetFOV = 70
 local targetTilt = 0
 local currentTilt = 0
+local flipAngle = 0
 
 local function clearActionForces()
 	if rootPart:FindFirstChild("ActionVelocity") then rootPart.ActionVelocity:Destroy() end
 	if rootPart:FindFirstChild("ActionAttachment") then rootPart.ActionAttachment:Destroy() end
 end
 
+local function stopGrapple()
+	if not isGrappling then return end
+	isGrappling = false
+	targetFOV = isSprinting and 85 or 70
+	
+	if grappleBeam then grappleBeam:Destroy() end
+	if grappleAtt0 then grappleAtt0:Destroy() end
+	if grappleAtt1 then grappleAtt1:Destroy() end
+	if grappleVelocity then grappleVelocity:Destroy() end
+	
+	humanoid:ChangeState(Enum.HumanoidStateType.Freefall)
+end
+
+local function startGrapple()
+	if isGrappling or isClimbing or isWallRunning or isSliding or isRolling or isBackflipping then return end
+	
+	local rayOrigin = camera.CFrame.Position
+	local rayDirection = camera.CFrame.LookVector * maxGrappleDistance
+	local hit = workspace:Raycast(rayOrigin, rayDirection, raycastParams)
+	
+	if hit then
+		isGrappling = true
+		targetFOV = 110
+		grappleTarget = hit.Position
+		
+		grappleAtt0 = Instance.new("Attachment", rootPart)
+		grappleAtt1 = Instance.new("Attachment", hit.Instance)
+		grappleAtt1.WorldPosition = hit.Position
+		
+		grappleBeam = Instance.new("Beam")
+		grappleBeam.Attachment0 = grappleAtt0
+		grappleBeam.Attachment1 = grappleAtt1
+		grappleBeam.FaceCamera = true
+		grappleBeam.Width0 = 0.2
+		grappleBeam.Width1 = 0.2
+		grappleBeam.Color = ColorSequence.new(Color3.new(1, 1, 1))
+		grappleBeam.Parent = rootPart
+		
+		grappleVelocity = Instance.new("LinearVelocity", rootPart)
+		grappleVelocity.Attachment0 = grappleAtt0
+		grappleVelocity.MaxForce = math.huge
+		grappleVelocity.VectorVelocity = (grappleTarget - rootPart.Position).Unit * grappleSpeed
+		
+		humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+	end
+end
+
+local function startBackflip()
+	if isBackflipping or isClimbing or isWallRunning or isDashing or isRolling or isGrappling then return end
+	isBackflipping = true
+	flipAngle = 0
+	targetFOV = 105
+	
+	flipParticles:Emit(30)
+	if not backflipTrack.IsPlaying then backflipTrack:Play() end
+	
+	local currentVel = rootPart.AssemblyLinearVelocity
+	rootPart.AssemblyLinearVelocity = Vector3.new(currentVel.X, 35, currentVel.Z)
+	
+	task.delay(backflipTime, function()
+		isBackflipping = false
+		targetFOV = isSprinting and 85 or 70
+		if backflipTrack.IsPlaying then backflipTrack:Stop() end
+	end)
+end
+
+local function startRoll()
+	if isRolling then return end
+	isRolling = true
+	targetFOV = 90
+	
+	rollParticles:Emit(40)
+	if not rollTrack.IsPlaying then rollTrack:Play() end
+	
+	local moveDir = humanoid.MoveDirection
+	if moveDir.Magnitude == 0 then moveDir = rootPart.CFrame.LookVector end
+	rootPart.AssemblyLinearVelocity = moveDir * sprintSpeed + Vector3.new(0, 15, 0)
+	
+	task.delay(0.75, function()
+		isRolling = false
+		targetFOV = isSprinting and 85 or 70
+		if rollTrack.IsPlaying then rollTrack:Stop() end
+	end)
+end
+
+humanoid.StateChanged:Connect(function(oldState, newState)
+	if newState == Enum.HumanoidStateType.Freefall then
+		isFalling = true
+		fallStartHeight = rootPart.Position.Y
+	elseif newState == Enum.HumanoidStateType.Landed then
+		if isBackflipping then
+			isBackflipping = false
+			if backflipTrack.IsPlaying then backflipTrack:Stop() end
+		end
+		
+		if isFalling then
+			isFalling = false
+			local fallDistance = fallStartHeight - rootPart.Position.Y
+			
+			if fallDistance > safeFallDistance then
+				if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then
+					startRoll()
+				else
+					humanoid:TakeDamage((fallDistance - safeFallDistance) * fallDamageMultiplier)
+				end
+			end
+		end
+	end
+end)
+
 local function startDash()
-	if isDashing or isClimbing or isWallRunning then return end
+	if isDashing or isClimbing or isWallRunning or isRolling or isBackflipping or isGrappling then return end
 	
 	isDashing = true
 	lastDashTime = tick()
 	targetFOV = 100 
 	
-	slideParticles:Emit(30)
+	dashParticles:Emit(40)
 	
 	local attachment = Instance.new("Attachment", rootPart)
 	attachment.Name = "DashAttachment"
@@ -105,7 +247,7 @@ local function startDash()
 end
 
 local function startSprint()
-	if isSprinting or isSliding then return end
+	if isSprinting or isSliding or isRolling or isBackflipping or isGrappling then return end
 	isSprinting = true
 	targetWalkSpeed = sprintSpeed
 	targetFOV = 85 
@@ -145,7 +287,7 @@ local function stopSlide()
 end
 
 local function startSlide()
-	if isSliding or isClimbing or isWallRunning then return end
+	if isSliding or isClimbing or isWallRunning or isRolling or isBackflipping or isGrappling then return end
 	local state = humanoid:GetState()
 	if state ~= Enum.HumanoidStateType.Running and state ~= Enum.HumanoidStateType.RunningNoPhysics then return end
 	
@@ -249,6 +391,10 @@ end
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if gameProcessed then return end
 	
+	if input.KeyCode == Enum.KeyCode.R then
+		startGrapple()
+	end
+	
 	if input.KeyCode == Enum.KeyCode.Q then
 		if tick() - lastDashTime >= dashCooldown then startDash() end
 	end
@@ -260,10 +406,23 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	end
 	
 	if input.KeyCode == Enum.KeyCode.C then
-		if isSprinting then startSlide() end
+		if isSprinting then
+			local state = humanoid:GetState()
+			if state == Enum.HumanoidStateType.Freefall or state == Enum.HumanoidStateType.Jumping then
+				startBackflip()
+			else
+				startSlide()
+			end
+		end
 	end
 	
 	if input.KeyCode == Enum.KeyCode.Space then
+		if isGrappling then
+			stopGrapple()
+			rootPart.AssemblyLinearVelocity = rootPart.AssemblyLinearVelocity + Vector3.new(0, 40, 0) + (camera.CFrame.LookVector * 40)
+			return
+		end
+		
 		if isSliding then
 			local hit = workspace:Raycast(rootPart.Position, Vector3.new(0, 4, 0), raycastParams)
 			if not hit then stopSlide() end
@@ -278,7 +437,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		
 		local state = humanoid:GetState()
 		if isSprinting and (state == Enum.HumanoidStateType.Freefall or state == Enum.HumanoidStateType.Jumping) then
-			if not isClimbing and not isWallRunning then
+			if not isClimbing and not isWallRunning and not isBackflipping then
 				local climbed = attemptWallClimb()
 				if not climbed then attemptWallRun() end
 			end
@@ -300,15 +459,24 @@ RunService:BindToRenderStep("SmoothMovement", Enum.RenderPriority.Camera.Value +
 	
 	if isWallRunning then
 		targetTilt = (wallRunSide == "Right") and 15 or -15
+	elseif isRolling or isBackflipping or isGrappling then
+		targetTilt = 0
 	else
 		local moveDir = rootPart.CFrame:VectorToObjectSpace(humanoid.MoveDirection)
 		targetTilt = -moveDir.X * 4 
 	end
 	
 	currentTilt = currentTilt + (targetTilt - currentTilt) * 10 * deltaTime
-	camera.CFrame = camera.CFrame * CFrame.Angles(0, 0, math.rad(currentTilt))
 	
-	local targetOffset = isSliding and Vector3.new(0, -1.5, -1) or Vector3.new(0, 0.8, -1)
+	if isBackflipping then
+		flipAngle = flipAngle + (360 / backflipTime) * deltaTime
+	else
+		flipAngle = 0
+	end
+	
+	camera.CFrame = camera.CFrame * CFrame.Angles(0, 0, math.rad(currentTilt)) * CFrame.Angles(math.rad(flipAngle), 0, 0)
+	
+	local targetOffset = (isSliding or isRolling) and Vector3.new(0, -1.5, -1) or Vector3.new(0, 0.8, -1)
 	humanoid.CameraOffset = humanoid.CameraOffset:Lerp(targetOffset, 10 * deltaTime)
 	
 	for _, part in pairs(character:GetChildren()) do
@@ -318,7 +486,24 @@ RunService:BindToRenderStep("SmoothMovement", Enum.RenderPriority.Camera.Value +
 	end
 end)
 
-RunService.Heartbeat:Connect(function()
+RunService.Heartbeat:Connect(function(deltaTime)
+	if isFalling then
+		if rootPart.Position.Y > fallStartHeight then
+			fallStartHeight = rootPart.Position.Y
+		end
+	end
+	
+	if isGrappling then
+		local dist = (grappleTarget - rootPart.Position).Magnitude
+		if dist < 5 then
+			stopGrapple()
+		else
+			if grappleVelocity then
+				grappleVelocity.VectorVelocity = (grappleTarget - rootPart.Position).Unit * grappleSpeed
+			end
+		end
+	end
+
 	if isClimbing then
 		if tick() >= actionEndTime then
 			stopWallActions()
