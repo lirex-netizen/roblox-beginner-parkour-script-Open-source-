@@ -85,6 +85,9 @@ local isFalling = false
 local isBackflipping = false
 local isGrappling = false
 
+local isThirdPerson = false
+local isShiftLocked = false
+
 local actionEndTime = 0
 local lastDashTime = 0
 local fallStartHeight = 0
@@ -102,6 +105,13 @@ local targetFOV = 70
 local targetTilt = 0
 local currentTilt = 0
 local flipAngle = 0
+
+player.CameraMinZoomDistance = 0.5
+player.CameraMaxZoomDistance = 0.5
+
+humanoid.Died:Connect(function()
+	UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+end)
 
 local function clearActionForces()
 	if rootPart:FindFirstChild("ActionVelocity") then rootPart.ActionVelocity:Destroy() end
@@ -391,6 +401,20 @@ end
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if gameProcessed then return end
 	
+	if input.KeyCode == Enum.KeyCode.V then
+		isThirdPerson = not isThirdPerson
+		if isThirdPerson then
+			player.CameraMode = Enum.CameraMode.Classic
+			player.CameraMinZoomDistance = 8
+			player.CameraMaxZoomDistance = 12
+		else
+			player.CameraMode = Enum.CameraMode.LockFirstPerson
+			player.CameraMinZoomDistance = 0.5
+			player.CameraMaxZoomDistance = 0.5
+			isShiftLocked = false
+		end
+	end
+	
 	if input.KeyCode == Enum.KeyCode.R then
 		startGrapple()
 	end
@@ -399,8 +423,13 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		if tick() - lastDashTime >= dashCooldown then startDash() end
 	end
 	
-	if input.KeyCode == Enum.KeyCode.LeftShift and UserInputService:IsKeyDown(Enum.KeyCode.W) then
-		startSprint()
+	if input.KeyCode == Enum.KeyCode.LeftShift then
+		if isThirdPerson then
+			isShiftLocked = not isShiftLocked
+		end
+		if UserInputService:IsKeyDown(Enum.KeyCode.W) then
+			startSprint()
+		end
 	elseif input.KeyCode == Enum.KeyCode.W and UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then
 		startSprint()
 	end
@@ -452,7 +481,27 @@ UserInputService.InputEnded:Connect(function(input, gameProcessed)
 end)
 
 RunService:BindToRenderStep("SmoothMovement", Enum.RenderPriority.Camera.Value + 1, function(deltaTime)
-	player.CameraMode = Enum.CameraMode.LockFirstPerson
+	if humanoid.Health <= 0 then return end
+	
+	if isThirdPerson then
+		if isShiftLocked then
+			UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+			humanoid.AutoRotate = false
+			
+			if not isWallRunning and not isGrappling and not isRolling and not isBackflipping then
+				local lookVector = camera.CFrame.LookVector
+				local flatLook = Vector3.new(lookVector.X, 0, lookVector.Z)
+				if flatLook.Magnitude > 0.001 then
+					rootPart.CFrame = CFrame.new(rootPart.Position, rootPart.Position + flatLook.Unit)
+				end
+			end
+		else
+			UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+			humanoid.AutoRotate = true
+		end
+	else
+		humanoid.AutoRotate = true
+	end
 	
 	humanoid.WalkSpeed = humanoid.WalkSpeed + (targetWalkSpeed - humanoid.WalkSpeed) * 10 * deltaTime
 	camera.FieldOfView = camera.FieldOfView + (targetFOV - camera.FieldOfView) * 10 * deltaTime
@@ -476,7 +525,17 @@ RunService:BindToRenderStep("SmoothMovement", Enum.RenderPriority.Camera.Value +
 	
 	camera.CFrame = camera.CFrame * CFrame.Angles(0, 0, math.rad(currentTilt)) * CFrame.Angles(math.rad(flipAngle), 0, 0)
 	
-	local targetOffset = (isSliding or isRolling) and Vector3.new(0, -1.5, -1) or Vector3.new(0, 0.8, -1)
+	local targetOffset
+	if isThirdPerson then
+		if isShiftLocked then
+			targetOffset = (isSliding or isRolling) and Vector3.new(1.75, -1.5, 0) or Vector3.new(1.75, 0.5, 0)
+		else
+			targetOffset = (isSliding or isRolling) and Vector3.new(0, -1.5, 0) or Vector3.new(0, 0, 0)
+		end
+	else
+		targetOffset = (isSliding or isRolling) and Vector3.new(0, -1.5, -1) or Vector3.new(0, 0.8, -1)
+	end
+	
 	humanoid.CameraOffset = humanoid.CameraOffset:Lerp(targetOffset, 10 * deltaTime)
 	
 	for _, part in pairs(character:GetChildren()) do
@@ -487,6 +546,8 @@ RunService:BindToRenderStep("SmoothMovement", Enum.RenderPriority.Camera.Value +
 end)
 
 RunService.Heartbeat:Connect(function(deltaTime)
+	if humanoid.Health <= 0 then return end
+	
 	if isFalling then
 		if rootPart.Position.Y > fallStartHeight then
 			fallStartHeight = rootPart.Position.Y
