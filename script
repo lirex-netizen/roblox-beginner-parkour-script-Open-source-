@@ -27,10 +27,13 @@ local fallDamageMultiplier = 2.5
 local maxGrappleDistance = 200
 local grappleSpeed = 100
 
+
 local sprintAnimationId = "rbxassetid://96859052091595" 
 local slideAnimationId = "rbxassetid://2133312581" 
 local rollAnimationId = "rbxassetid://3288508192" 
 local backflipAnimationId = "rbxassetid://1234567890" 
+local wallClimbAnimationId = "rbxassetid://0000000000"
+local wallRunAnimationId = "rbxassetid://0000000000" 
 
 local raycastParams = RaycastParams.new()
 raycastParams.FilterDescendantsInstances = {character}
@@ -53,6 +56,14 @@ local rollTrack = animator:LoadAnimation(rollAnimation)
 local backflipAnimation = Instance.new("Animation")
 backflipAnimation.AnimationId = backflipAnimationId
 local backflipTrack = animator:LoadAnimation(backflipAnimation)
+
+local wallClimbAnimation = Instance.new("Animation")
+wallClimbAnimation.AnimationId = wallClimbAnimationId
+local wallClimbTrack = animator:LoadAnimation(wallClimbAnimation)
+
+local wallRunAnimation = Instance.new("Animation")
+wallRunAnimation.AnimationId = wallRunAnimationId
+local wallRunTrack = animator:LoadAnimation(wallRunAnimation)
 
 local function createDust(name, color, direction)
 	local dust = Instance.new("ParticleEmitter")
@@ -346,6 +357,8 @@ local function stopWallActions()
 	isWallRunning = false
 	targetFOV = isSprinting and 85 or 70
 	wallParticles.Enabled = false
+	if wallClimbTrack.IsPlaying then wallClimbTrack:Stop() end
+	if wallRunTrack.IsPlaying then wallRunTrack:Stop() end
 	clearActionForces()
 end
 
@@ -356,6 +369,7 @@ local function attemptWallClimb()
 		targetFOV = 85
 		actionEndTime = tick() + maxClimbTime
 		wallParticles.Enabled = true
+		if not wallClimbTrack.IsPlaying then wallClimbTrack:Play() end
 		
 		local attachment = Instance.new("Attachment", rootPart)
 		attachment.Name = "ActionAttachment"
@@ -381,6 +395,7 @@ local function attemptWallRun()
 		currentWallNormal = hit.Normal
 		wallRunSide = rightRay and "Right" or "Left"
 		wallParticles.Enabled = true
+		if not wallRunTrack.IsPlaying then wallRunTrack:Play() end
 		
 		local attachment = Instance.new("Attachment", rootPart)
 		attachment.Name = "ActionAttachment"
@@ -415,6 +430,12 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		end
 	end
 	
+	if input.KeyCode == Enum.KeyCode.N then
+		if isThirdPerson then
+			isShiftLocked = not isShiftLocked
+		end
+	end
+	
 	if input.KeyCode == Enum.KeyCode.R then
 		startGrapple()
 	end
@@ -424,9 +445,6 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	end
 	
 	if input.KeyCode == Enum.KeyCode.LeftShift then
-		if isThirdPerson then
-			isShiftLocked = not isShiftLocked
-		end
 		if UserInputService:IsKeyDown(Enum.KeyCode.W) then
 			startSprint()
 		end
